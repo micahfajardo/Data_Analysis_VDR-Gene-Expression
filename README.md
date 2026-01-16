@@ -2,8 +2,7 @@
 
 ## 📋 Project Overview
 This project investigates the molecular landscape of the Vitamin D Receptor (VDR) in melanoma patients. Using R, I processed genomic datasets (Copy Number Alterations and RNA-Seq) and clinical data to identify how VDR genomic status correlates with gene expression and patient demographics
-
-The analysis is inspired by the findings of Muralidhar et al. (2019), which suggest that reduced VDR expression is linked to faster disease progression.
+> The datasets used in this project are available upon request. 
 
 ---
 
