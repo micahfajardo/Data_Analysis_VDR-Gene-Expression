@@ -1,0 +1,263 @@
+library("readr")
+library("tidyverse")
+library(ggpubr)
+library(ggplot2)
+library(stringr)
+library(rstatix)
+library(tidyr)
+
+patient <- read_tsv("C:/Users/user/Documents/data_bcr_clinical_data_patient.txt", show_col_types = FALSE)
+cna <- read_tsv("C:/Users/user/Documents/data_CNA.txt", show_col_types = FALSE)
+rna <- read_tsv("C:/Users/user/Documents/data_RNA_Seq_v2_mRNA_median_Zscores.txt", show_col_types = FALSE)
+
+# =========================================================================
+#  Association between VDR copy number and expression
+# =========================================================================
+
+#Filter VDR data only
+vdr_cna <- cna %>% 
+  filter(Hugo_Symbol == "VDR")
+vdr_rna <- rna %>% 
+  filter(Hugo_Symbol == "VDR")
+
+#Convert wide df-> long df
+vdr_cna_long <- vdr_cna %>%
+  pivot_longer(
+    cols = -c(Hugo_Symbol, Entrez_Gene_Id),  
+    names_to = "patient_id",                     
+    values_to = "copy_number"                
+  )
+
+vdr_rna_long <- vdr_rna %>%
+  pivot_longer(
+    cols = -c(Hugo_Symbol, Entrez_Gene_Id),
+    names_to = "patient_id",
+    values_to = "expression"
+  )
+
+# Clean data types and remove missing values
+vdr_cna_long <- vdr_cna_long %>%
+  mutate(copy_number = as.factor(copy_number))
+vdr_rna_long <- vdr_rna_long %>%
+  mutate(expression = as.numeric(expression))
+
+#Merge copy number and expression tables
+vdr_merged <- inner_join(vdr_cna_long, vdr_rna_long, by = "patient_id")
+vdr_merged <- vdr_merged %>%
+  select(patient_id, copy_number, expression) %>%
+  distinct()
+vdr_merged$copy_number <- droplevels(vdr_merged$copy_number)
+
+#basic boxplot for gene expression and copy number
+boxplot(
+  expression ~ copy_number,
+  data = vdr_merged,
+  main = "VDR Gene Expression and Copy Number Association",
+  xlab = "TCGA-VDR Copy Number",
+  ylab = "VDR Expression (GISTIC Measures)"
+)
+
+#test for normality
+by(vdr_merged$expression, vdr_merged$copy_number, shapiro.test)
+
+#test for statistical significance: Kruskal-Wallis
+kruskal_result <- vdr_merged %>%
+  kruskal_test(expression ~ copy_number)
+print(kruskal_result)
+
+#pairwise comparisons for annotation for boxplot
+comparisons_list <- list(
+  c("-1", "0"),
+  c("-1", "1"),
+  c("-1", "2"),
+  c("0", "1"),
+  c("0", "2"),
+  c("1", "2")
+)
+
+# Pairwise Wilcoxon results for copy number and expression
+pairwise_results <- vdr_merged %>%
+  wilcox_test(expression ~ copy_number, comparisons = comparisons_list) %>%
+  adjust_pvalue(method = "fdr") %>%
+  add_xy_position(x = "copy_number")
+filtered_results <- pairwise_results %>%
+  filter(p.adj < 0.05) %>%
+  mutate(
+    p.label = paste0("p= ", format.pval(p.adj, digits = 3, eps = 0.0001))
+  )
+
+#create boxplot with ggplot2 and ggpubr for copy number and expression
+ggplot(vdr_merged, aes(x = copy_number, y = expression, color = copy_number)) +
+  
+  geom_boxplot(
+    width = 0.7,
+    outlier.shape = 21,
+    outlier.fill = "white",
+    outlier.size = 2.5,
+    outlier.stroke = 1
+  ) +
+  
+  # Plot significant comparisons only
+  stat_pvalue_manual(
+    filtered_results,
+    label = "p.label",
+    tip.length = 0.01, 
+    size = 4,
+    hide.ns = TRUE 
+  ) +
+  
+  scale_color_manual(values = c(
+    "-1" = "#009E9E",
+    "0" = "#B3C200",
+    "1"= "#800080",
+    "2"= "#E64B35"
+  )) +
+  
+  theme_pubr(base_size = 14) +
+  labs(
+    title = "VDR Gene Expression and Copy Number Association",
+    x = "VDR Copy Number (GISTIC categories)",
+    y = "VDR Gene Expression"
+  ) +
+  theme(
+    legend.position = "none",
+  )
+ 
+# =========================================================================
+# Gender and Vital Signs against VDR Expression and Copy number
+# =========================================================================
+
+#Create new dataframe containing gender and vital signs
+vdr_final <- vdr_merged %>%
+  # A. Remove "-06" suffix from patient table
+  mutate(
+    patient_id_core = str_remove(patient_id, "-06$")
+  ) %>%
+  
+  # B. Left Join with the 'patient' table
+  left_join(
+    patient,
+    by = c("patient_id_core" = "Patient Identifier")
+  ) %>%
+  
+  # C. Select and rename columns on new dataframe
+  select(
+    patient_id = patient_id_core,
+    copy_number,
+    expression,
+    gender = `Person Gender`,
+    vital_status = `Patient's Vital Status`
+  ) %>%
+  
+  # D. Data Cleaning
+  mutate(
+    vital_status = na_if(vital_status, "[Not Available]"),
+    copy_number = as.numeric(as.character(copy_number)),
+    gender = as.factor(gender),
+    vital_status = as.factor(vital_status)
+  ) %>%
+  drop_na(
+    gender,
+    vital_status
+  )
+
+# Normality Tests 
+cat("\n--- Normality Test: VDR Expression ---\n")
+vdr_final %>% group_by(gender) %>% shapiro_test(expression)
+vdr_final %>% group_by(vital_status) %>% shapiro_test(expression)
+
+cat("\n--- Normality Test: VDR Copy Number ---\n")
+vdr_final %>% group_by(gender) %>% shapiro_test(copy_number)
+vdr_final %>% group_by(vital_status) %>% shapiro_test(copy_number)
+
+# Create boxplot function
+vdr_boxplot <- function(data, x_var, y_var, y_lab, title, stat_method = "wilcox.test") {
+  
+  # Boxplot properties
+  colors <- c("#00AFBB", "#E7B800")
+  
+  p <- ggplot(data, aes_string(x = x_var, y = y_var, fill = x_var)) +
+    geom_boxplot(
+      width = 0.7,
+      outlier.shape = 21,
+      outlier.fill = "white",
+      outlier.size = 2.5,
+      outlier.stroke = 1
+    ) +
+    
+    {if (y_var == "copy_number") scale_y_continuous(breaks = seq(min(data$copy_number), max(data$copy_number), by = 1))} +
+    
+    # Wilcoxon Rank-Sum Test 
+    stat_compare_means(
+      method = stat_method,
+      hide.ns = FALSE,
+      label = "p.format", 
+      label.prefix = "p=",
+      label.x.npc = 0.50,
+      label.y.npc = 0.95,
+      size = 3.5,
+    ) +
+    
+    scale_fill_manual(values = colors) +
+    
+    labs(
+      title = title,
+      x = stringr::str_to_title(gsub("_", " ", x_var)),
+      y = y_lab,
+      fill = stringr::str_to_title(gsub("_", " ", x_var))
+    ) +
+    
+    theme_pubr(base_size = 8) +
+    
+    theme(
+      axis.line.x = element_line(colour = "black", size = 0.5), 
+      axis.line.y = element_line(colour = "black", size = 0.5),
+     
+      axis.ticks.x = element_line(colour = "black", size = 0.5),
+      axis.ticks.y = element_line(colour = "black", size = 0.5),
+      
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      
+      legend.position = "none",
+      plot.title = element_text(size = 10, face = "bold"),
+      axis.title = element_text(size = 9)
+    )
+  
+  return(p)
+}
+
+# VDR Expression Associations
+p_expr_gender <- vdr_boxplot(
+  vdr_final, "gender", "expression", 
+  "VDR Gene Expression", 
+  "A. VDR Expression vs. Gender"
+)
+
+p_expr_vital <- vdr_boxplot(
+  vdr_final, "vital_status", "expression", 
+  "VDR Gene Expression", 
+  "B. VDR Expression vs. Vital Status"
+)
+
+# VDR Copy Number Associations
+p_cn_gender <- vdr_boxplot(
+  vdr_final, "gender", "copy_number", 
+  "VDR Copy Number (GISTIC Score)", 
+  "C. VDR Copy Number vs. Gender"
+)
+
+p_cn_vital <- vdr_boxplot(
+  vdr_final, "vital_status", "copy_number", 
+  "VDR Copy Number (GISTIC Score)", 
+  "D. VDR Copy Number vs. Vital Status"
+)
+
+# Plot arrangement
+final_figure <- ggarrange(
+  p_expr_gender, p_expr_vital, p_cn_gender, p_cn_vital,
+  ncol = 2, nrow = 2,
+  align = "hv"
+)
+
+print(final_figure)
